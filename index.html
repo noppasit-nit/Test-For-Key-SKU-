@@ -33,11 +33,13 @@
     <label>Retailer <select id="fRetailer"></select></label>
     <label>SKU pair <select id="fPair"></select></label>
     <label>Competitor <select id="fComp"></select></label>
+    <label title="Whether each SKU is sold at the retailer (from SKU_Pairs availability columns)">Availability <select id="fAvail"></select></label>
     <label>Date range
       <span class="seg" id="fRange">
         <button data-days="7">7 days</button><button data-days="30">30 days</button><button data-days="60" class="on">60 days</button>
       </span>
     </label>
+    <span class="fnote hidden" id="filterNote" role="status"></span>
     <button class="linkbtn" id="reload" title="Read the Google Sheet again">↻ Refresh data</button>
   </div>
   <div class="legendbar" id="legend"></div>
