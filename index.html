@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Malee Price &amp; Promo Tracker</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-inner">
+    <div>
+      <h1>Malee Price &amp; Promo Tracker</h1>
+      <p class="sub">Malee vs competitors on key SKUs, at Thai retailers. Price index = Malee ÷ competitor × 100 (competitor = 100).</p>
+    </div>
+    <div class="fresh" id="fresh" title="Time of the newest row in the Price_Log tab of the Google Sheet">
+      <div class="fresh-label">Last updated</div>
+      <div class="fresh-value" id="lastUpdated">–</div>
+      <div class="fresh-sub" id="retailerCount"></div>
+    </div>
+  </div>
+  <div class="mockup-banner" role="note">
+    <strong>MOCKUP</strong> History before 20 Nov 2026 is MOCKUP; 20 Nov prices are real public retailer prices.
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="week" role="tab">This Week</button>
+    <button class="tab" data-tab="promo" role="tab">Promo Pattern</button>
+    <button class="tab" data-tab="history" role="tab">Price History</button>
+    <button class="tab" data-tab="log" role="tab">Data Log</button>
+  </nav>
+  <div class="filters" id="filters">
+    <label>Channel <select id="fChannel"></select></label>
+    <label>Retailer <select id="fRetailer"></select></label>
+    <label>SKU pair <select id="fPair"></select></label>
+    <label>Competitor <select id="fComp"></select></label>
+    <label>Date range
+      <span class="seg" id="fRange">
+        <button data-days="7">7 days</button><button data-days="30">30 days</button><button data-days="60" class="on">60 days</button>
+      </span>
+    </label>
+    <button class="linkbtn" id="reload" title="Read the Google Sheet again">↻ Refresh data</button>
+  </div>
+  <div class="legendbar" id="legend"></div>
+</header>
+
+<main id="main">
+  <div id="loading" class="state"><div class="spinner"></div><p>Loading live data from Google Sheet…</p></div>
+  <div id="error" class="state error hidden">
+    <h2>Couldn't load data from Google Sheet</h2>
+    <p id="errorMsg"></p>
+    <p>Check that the Sheet is shared as "Anyone with the link can view" (or published to the web), then press Refresh.</p>
+    <button class="btn" onclick="location.reload()">Try again</button>
+  </div>
+
+  <section id="tab-week" class="panel hidden">
+    <h2 class="sec">Alerts <span id="alertCount" class="hint"></span> <span class="hint" title="Red = outside the band for that channel and pair. Amber = inside the band but within the margin of an edge. Green = comfortably inside.">ⓘ</span></h2>
+    <p class="sec-sub" id="bandText"></p>
+    <div id="alerts"></div>
+    <h2 class="sec">What changed this week</h2>
+    <p class="sec-sub">Price moves and promos that started or ended in the 7 days up to the latest check.</p>
+    <ul id="changes" class="changes"></ul>
+    <h2 class="sec">Today's status – all pairs</h2>
+    <p class="sec-sub">Full status of every retailer × SKU pair, including the ones with nothing to act on. Prices are per unit (multi-packs divided by pack size).</p>
+    <details class="today"><summary id="todaySummary">Show all pairs today</summary>
+    <div class="tablewrap"><table id="todayTable" class="tbl"></table></div></details>
+  </section>
+
+  <section id="tab-promo" class="panel hidden">
+    <h2 class="sec">Competitor promo pattern</h2>
+    <p class="sec-sub" id="patternSub"></p>
+    <div id="patternCards" class="stat-cards"></div>
+    <h2 class="sec">Counter-move calculator <span class="hint" title="Enter the competitor's price. It shows the Malee price range that keeps the index inside the band from the Settings tab.">ⓘ</span></h2>
+    <div class="calc" id="calc"></div>
+    <h2 class="sec">Promo timeline</h2>
+    <p class="sec-sub">Each block is a promo period, labelled with its discount. The bottom strip shows the daily index status.</p>
+    <div id="timelines"></div>
+  </section>
+
+  <section id="tab-history" class="panel hidden">
+    <div class="sec-row">
+      <h2 class="sec">Price history</h2>
+      <span class="seg" id="metric"><button data-m="ppm" class="on">Price per 100 ml</button><button data-m="idx">Price index</button></span>
+    </div>
+    <p class="sec-sub" id="histSub"></p>
+    <div id="charts" class="charts"></div>
+    <h2 class="sec">History table</h2>
+    <div class="tablewrap tall"><table id="histTable" class="tbl"></table></div>
+  </section>
+
+  <section id="tab-log" class="panel hidden">
+    <div class="sec-row">
+      <h2 class="sec">Data log</h2>
+      <div class="log-actions">
+        <input id="logSearch" type="search" placeholder="Search retailer, brand, promo, note…">
+        <button class="btn" id="dlCsv">Download CSV</button>
+        <a class="btn ghost" id="openSheet" target="_blank" rel="noopener">Open Google Sheet ↗</a>
+      </div>
+    </div>
+    <p class="sec-sub" id="logSub"></p>
+    <div class="tablewrap"><table id="logTable" class="tbl small"></table></div>
+    <div class="pager" id="pager"></div>
+  </section>
+</main>
+<div id="tip" class="tip hidden"></div>
+<footer class="foot">Data is read live from the Google Sheet each time this page loads. Suggested moves are suggestions, not facts. Public retailer data only.</footer>
+<script src="assets/app.js"></script>
+</body>
+</html>
