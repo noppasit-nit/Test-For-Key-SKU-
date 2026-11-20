@@ -73,3 +73,10 @@ sensitive data goes in:
 - `assets/app.js` – loads the Sheet (SKU_Pairs, Price_Log, Promo_Log, Settings, Bands, Retailers), does the calculations and draws everything (no external libraries)
 - `assets/styles.css` – the look
 - `.nojekyll` – tells GitHub Pages to serve the files as-is
+
+## Availability ("Not sold here")
+SKU_Pairs columns `malee_availability` / `competitor_availability` take `listed`, `not_sold` or `unknown`.
+A side is "Not sold here" when it is `not_sold` there, or when its latest Price_Log row has no price and its mechanic/note says "Not sold here".
+Such pairs show no price, index, band status or alert ("No comparison"). The Availability filter is built from the data.
+Filters are faceted: each list shows only values that have rows given the other selections (with counts). An impossible selection is reset to All with a note.
+When the same SKU/retailer is checked more than once on a day, only the latest row counts; earlier rows are tagged "Superseded" in the Data Log.

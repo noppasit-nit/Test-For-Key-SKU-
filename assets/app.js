@@ -43,7 +43,7 @@ function parseCSV(text) {
 }
 
 // ---------- state ----------
-const S = { tab: 'week', channel: 'All', retailer: 'All', pair: 'All', comp: 'All', days: 60, metric: 'ppm', logPage: 0, logSort: { k: 'check_datetime', dir: -1 }, logQuery: '' };
+const S = { tab: 'week', channel: 'All', retailer: 'All', pair: 'All', comp: 'All', avail: 'All', days: 60, metric: 'ppm', logPage: 0, logSort: { k: 'check_datetime', dir: -1 }, logQuery: '' };
 let D = null; // processed data
 
 function brandColor(brand) {
@@ -104,7 +104,7 @@ function process(raw) {
     if (comp) sizes[pid + '|' + comp] = num(r.competitor_size_ml) || 1000;
     if (r.retailer) {
       pairs[pid].retailers[r.retailer] = { malee_url: r.malee_url, competitor_url: r.competitor_url, note: r.note };
-      if (comp) comps.push({ key: pid + '|' + comp + '|' + r.retailer, pair: pid, comp, retailer: r.retailer, malee_url: r.malee_url, competitor_url: r.competitor_url, note: r.note });
+      if (comp) comps.push({ key: pid + '|' + comp + '|' + r.retailer, pair: pid, comp, retailer: r.retailer, malee_url: r.malee_url, competitor_url: r.competitor_url, note: r.note, mAvail: availVal(r.malee_availability), kAvail: availVal(r.competitor_availability), availNote: r.availability_note || '' });
     }
   });
   const prices = raw.Price_Log.filter((r) => r.check_id && r.check_datetime).map((r) => {
@@ -113,7 +113,9 @@ function process(raw) {
     o.reg = num(r.regular_price_thb); o.promo = num(r.promo_price_thb); o.eff = num(r.effective_price_thb);
     o.pack = num(r.pack_units) || 1; o.unit = num(r.unit_price_thb); if (o.unit == null && o.eff != null) o.unit = o.eff / o.pack;
     o.ppm = num(r.price_per_100ml); const size = sizes[r.pair_id + '|' + r.brand] || 1000; if (o.ppm == null && o.unit != null) o.ppm = o.unit / (size / 100);
-    o.onPromo = !!(r.promo_mechanic || o.promo != null);
+    // a REAL row with no price whose mechanic/note says 'Not sold here' records that the retailer does not carry the SKU
+    o.notSold = o.eff == null && o.unit == null && o.reg == null && /not sold/i.test((r.promo_mechanic || '') + ' ' + (r.note || ''));
+    o.onPromo = !o.notSold && !!(r.promo_mechanic || o.promo != null);
     return o;
   });
   // add comparisons that exist only in Price_Log (e.g. new pair added there first)
@@ -121,7 +123,7 @@ function process(raw) {
   prices.forEach((p) => {
     if (p.brand === MALEE) return;
     const k = p.pair_id + '|' + p.brand + '|' + p.retailer;
-    if (!seen.has(k)) { seen.add(k); comps.push({ key: k, pair: p.pair_id, comp: p.brand, retailer: p.retailer }); if (!pairs[p.pair_id]) pairs[p.pair_id] = { id: p.pair_id, category: p.pair_id, malee_sku: '', competitors: { [p.brand]: p.sku }, retailers: {} }; }
+    if (!seen.has(k)) { seen.add(k); comps.push({ key: k, pair: p.pair_id, comp: p.brand, retailer: p.retailer, mAvail: 'listed', kAvail: 'listed', availNote: '' }); if (!pairs[p.pair_id]) pairs[p.pair_id] = { id: p.pair_id, category: p.pair_id, malee_sku: '', competitors: { [p.brand]: p.sku }, retailers: {} }; }
   });
   // daily series: latest check per (pair|brand|retailer) per date
   const series = {};
@@ -129,6 +131,8 @@ function process(raw) {
     const k = p.pair_id + '|' + p.brand + '|' + p.retailer;
     (series[k] = series[k] || {})[p.date] = p;
   });
+  // a row is superseded when a later check of the same SKU at the same retailer on the same day exists (only the latest counts)
+  prices.forEach((p) => { p.superseded = series[p.pair_id + '|' + p.brand + '|' + p.retailer][p.date] !== p; });
   const promos = raw.Promo_Log.filter((r) => r.promo_id).map((r) => Object.assign({}, r, { depth: num(r.depth_pct) }));
   const newest = prices.reduce((m, p) => (p.check_datetime > m.check_datetime ? p : m), prices[0]);
   const anchor = newest ? newest.date : dstr(Math.floor(Date.now() / 864e5));
@@ -137,6 +141,14 @@ function process(raw) {
   const order = ['Big C', 'Tops', 'Makro', "Lotus's"];
   retailers.sort((a, b) => ((order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99)) || a.localeCompare(b));
   comps.forEach((c) => { c.channel = chanOf[c.retailer] || 'Unassigned'; c.band = bandFor(c.channel, c.pair); });
+  // availability: a side is 'not sold' when SKU_Pairs says not_sold, or its latest check is a 'Not sold here' row
+  const lastOf = (k) => { const s = series[k]; if (!s) return null; const ds = Object.keys(s).filter((d) => d <= anchor).sort(); return ds.length ? s[ds[ds.length - 1]] : null; };
+  comps.forEach((c) => {
+    const lm = lastOf(c.pair + '|' + MALEE + '|' + c.retailer), lk = lastOf(c.pair + '|' + c.comp + '|' + c.retailer);
+    c.mSold = c.mAvail !== 'not_sold' && !(lm && lm.notSold);
+    c.kSold = c.kAvail !== 'not_sold' && !(lk && lk.notSold);
+    c.avail = c.mSold && c.kSold ? 'both' : c.mSold ? 'malee_only' : c.kSold ? 'comp_only' : 'none';
+  });
   if (comps.some((c) => c.channel === 'Unassigned') && !channels.includes('Unassigned')) channels.push('Unassigned');
   comps.sort((a, b) => a.pair.localeCompare(b.pair) || retailers.indexOf(a.retailer) - retailers.indexOf(b.retailer) || a.comp.localeCompare(b.comp));
   return { settings, band, bands, channels, chanOf, pairs, comps, prices, series, promos, newest, anchor, firstDate, retailers, sizes, extraColors: {} };
@@ -151,6 +163,13 @@ function statusOf(idx, b) {
   return 'green';
 }
 const STATUS_TEXT = { red: 'Out of band', amber: 'Near band edge', green: 'In band', grey: 'No comparison' };
+const AVAIL_ORDER = ['both', 'malee_only', 'comp_only', 'none'];
+const AVAIL_TEXT = { both: 'Both sold', malee_only: 'Malee only', comp_only: 'Competitor only', none: 'Not sold' };
+function availVal(v) { v = String(v || '').trim().toLowerCase().replace(/[\s-]+/g, '_'); return v === 'not_sold' || v === 'unknown' ? v : 'listed'; }
+const nsTag = (brand, c) => '<span class="tag ns" title="' + esc(brand + ' is not sold here, so there is no price and no index.' + (c && c.availNote ? ' ' + c.availNote : '')) + '">Not sold here</span>';
+// a side's row counts only if that SKU is sold at the retailer and the row is not a 'Not sold here' record
+const sideNS = (c, brand, raw) => (brand === MALEE ? !c.mSold : !c.kSold) || !!(raw && raw.notSold);
+const sideRow = (c, brand, raw) => sideNS(c, brand, raw) ? null : raw;
 function getRow(pair, brand, retailer, date) { const s = D.series[pair + '|' + brand + '|' + retailer]; return s ? s[date] : null; }
 function latestRow(pair, brand, retailer, upto) {
   const s = D.series[pair + '|' + brand + '|' + retailer]; if (!s) return null;
@@ -159,15 +178,17 @@ function latestRow(pair, brand, retailer, upto) {
 function compSeries(c, fromDate, toDate) {
   const out = [];
   for (let n = dnum(fromDate); n <= dnum(toDate); n++) {
-    const d = dstr(n); const m = getRow(c.pair, MALEE, c.retailer, d); const k = getRow(c.pair, c.comp, c.retailer, d);
-    out.push({ date: d, m, k, idx: m && k && m.ppm && k.ppm ? (m.ppm / k.ppm) * 100 : null });
+    const d = dstr(n); const rm = getRow(c.pair, MALEE, c.retailer, d), rk = getRow(c.pair, c.comp, c.retailer, d);
+    const m = sideRow(c, MALEE, rm), k = sideRow(c, c.comp, rk); const mNS = sideNS(c, MALEE, rm), kNS = sideNS(c, c.comp, rk);
+    out.push({ date: d, m, k, mNS, kNS, idx: !mNS && !kNS && m && k && m.ppm && k.ppm ? (m.ppm / k.ppm) * 100 : null });
   }
   return out;
 }
 function latestCompare(c) {
-  const m = latestRow(c.pair, MALEE, c.retailer, D.anchor); const k = latestRow(c.pair, c.comp, c.retailer, D.anchor);
-  const idx = m && k && m.ppm && k.ppm ? (m.ppm / k.ppm) * 100 : null;
-  return { m, k, idx, status: statusOf(idx, c.band) };
+  const mRaw = latestRow(c.pair, MALEE, c.retailer, D.anchor), kRaw = latestRow(c.pair, c.comp, c.retailer, D.anchor);
+  const mNS = sideNS(c, MALEE, mRaw), kNS = sideNS(c, c.comp, kRaw); const m = mNS ? null : mRaw, k = kNS ? null : kRaw;
+  const idx = !mNS && !kNS && m && k && m.ppm && k.ppm ? (m.ppm / k.ppm) * 100 : null; // index only when both sides have a price
+  return { m, k, mRaw, kRaw, mNS, kNS, ns: mNS || kNS, idx, status: statusOf(idx, c.band) };
 }
 // Malee unit price that gives a given index against a competitor unit price
 function maleePriceFor(c, compUnit, index) {
@@ -179,8 +200,10 @@ function promoDepth(row) {
   if (row.reg != null && row.promo != null && row.reg > 0) return '−' + Math.round(((row.reg - row.promo) / row.reg) * 100) + '%';
   return row.promo_mechanic || 'promo';
 }
+const nsWho = (c, L) => L.mNS && L.kNS ? 'Neither SKU is' : (L.kNS ? c.comp : 'Malee') + ' is';
 function headline(c, L) {
   const b = c.band;
+  if (L.ns) return 'No comparison: ' + nsWho(c, L) + ' not sold at ' + c.retailer;
   if (!L.m || !L.k) return 'Check the ' + (!L.k ? c.comp : 'Malee') + ' listing at ' + c.retailer;
   const maxP = maleePriceFor(c, L.k.unit, b.high);
   const kEnd = L.k.onPromo && L.k.promo_end_date ? dnum(L.k.promo_end_date) - dnum(TODAY) : null;
@@ -208,6 +231,7 @@ function headline(c, L) {
 }
 function suggestion(c, L) {
   const b = c.band;
+  if (L.ns) return { kind: 'No comparison', text: nsWho(c, L) + ' not sold at ' + c.retailer + ', so there is no index and no band status.' };
   if (!L.m || !L.k) return { kind: 'Check', text: 'No ' + (!L.k ? c.comp : 'Malee') + ' price found at ' + c.retailer + ' – check the listing.' };
   const maxP = maleePriceFor(c, L.k.unit, b.high), minP = maleePriceFor(c, L.k.unit, b.low);
   const compPromo = L.k.onPromo, end = L.k.promo_end_date;
@@ -225,18 +249,44 @@ function suggestion(c, L) {
 const bandLabel = (c) => 'Band ' + c.band.low + '–' + c.band.high + ' · ' + c.band.channel + (c.band.source === 'default' ? ' (default)' : '');
 const bandChip = (c) => '<span class="bandchip" title="Price-index band used here (lookup: channel + pair → channel + ALL → default). ' + (c.band.data_type === 'MOCKUP' ? 'MOCKUP band, to be set by Marketing.' : '') + '">' + esc(bandLabel(c)) + '</span>';
 // ---------- filters ----------
-function filteredComps() {
-  return D.comps.filter((c) => (S.channel === 'All' || c.channel === S.channel) && (S.retailer === 'All' || c.retailer === S.retailer) && (S.pair === 'All' || c.pair === S.pair) && (S.comp === 'All' || c.comp === S.comp));
-}
+// Faceted filters: each dropdown lists only values that exist given the OTHER selections (from SKU_Pairs + Retailers data)
+const FDIMS = [
+  { k: 'channel', id: 'fChannel', name: 'Channel', all: 'All channels', get: (c) => c.channel },
+  { k: 'retailer', id: 'fRetailer', name: 'Retailer', all: 'All retailers', get: (c) => c.retailer },
+  { k: 'pair', id: 'fPair', name: 'SKU pair', all: 'All SKU pairs', get: (c) => c.pair },
+  { k: 'comp', id: 'fComp', name: 'Competitor', all: 'All competitors', get: (c) => c.comp },
+  { k: 'avail', id: 'fAvail', name: 'Availability', all: 'All', get: (c) => c.avail },
+];
+const matchesExcept = (c, skip) => FDIMS.every((f) => f.k === skip || S[f.k] === 'All' || f.get(c) === S[f.k]);
+function filteredComps() { return D.comps.filter((c) => matchesExcept(c, null)); }
 const pairLabel = (pid) => { const p = D.pairs[pid]; return p ? pid + ' · ' + (p.category || '') : pid; };
 const pairTitle = (c) => { const p = D.pairs[c.pair]; return (p && p.category ? p.category : c.pair) + ': Malee vs ' + c.comp; };
-function buildFilters() {
+function optLabel(f, v) { return f.k === 'pair' ? pairLabel(v) : f.k === 'avail' ? AVAIL_TEXT[v] || v : v; }
+function optOrder(f, vals) {
+  const ref = f.k === 'channel' ? D.channels : f.k === 'retailer' ? D.retailers : f.k === 'avail' ? AVAIL_ORDER : null;
+  return vals.sort((a, b) => ref ? ((ref.indexOf(a) + 1 || 99) - (ref.indexOf(b) + 1 || 99)) || a.localeCompare(b) : a.localeCompare(b));
+}
+// changedKey = the filter the user just changed (kept); any other selection that no longer has rows is reset to All with a note
+function buildFilters(changedKey) {
+  const resets = [];
+  for (let guard = 0; guard < FDIMS.length + 1; guard++) {
+    // a selection is invalid when no pair has that value together with the other selections (then the result would be empty)
+    const bad = FDIMS.filter((f) => S[f.k] !== 'All' && !D.comps.some((c) => matchesExcept(c, f.k) && f.get(c) === S[f.k]));
+    if (!bad.length) break;
+    // reset the least recently touched invalid filter first (never the one just changed, unless it is invalid on its own)
+    const f = bad.find((x) => x.k !== changedKey) || bad[0];
+    resets.push(f.name + ' "' + optLabel(f, S[f.k]) + '"'); S[f.k] = 'All';
+  }
   const opt = (v, l, sel) => '<option value="' + esc(v) + '"' + (v === sel ? ' selected' : '') + '>' + esc(l) + '</option>';
-  $('fChannel').innerHTML = opt('All', 'All channels', S.channel) + D.channels.map((c) => opt(c, c, S.channel)).join('');
-  $('fRetailer').innerHTML = opt('All', 'All retailers', S.retailer) + D.retailers.filter((r) => S.channel === 'All' || (D.chanOf[r] || 'Unassigned') === S.channel).map((r) => opt(r, r, S.retailer)).join('');
-  $('fPair').innerHTML = opt('All', 'All SKU pairs', S.pair) + Object.keys(D.pairs).sort().map((p) => opt(p, pairLabel(p), S.pair)).join('');
-  const comps = [...new Set(D.comps.map((c) => c.comp))].sort();
-  $('fComp').innerHTML = opt('All', 'All competitors', S.comp) + comps.map((c) => opt(c, c, S.comp)).join('');
+  FDIMS.forEach((f) => {
+    const cnt = {}; let total = 0;
+    D.comps.forEach((c) => { if (matchesExcept(c, f.k)) { const v = f.get(c); cnt[v] = (cnt[v] || 0) + 1; total++; } });
+    $(f.id).innerHTML = opt('All', f.all + ' (' + total + ')', S[f.k]) + optOrder(f, Object.keys(cnt)).map((v) => opt(v, optLabel(f, v) + ' (' + cnt[v] + ')', S[f.k])).join('');
+  });
+  const note = $('filterNote');
+  if (resets.length) { note.textContent = resets.join(', ') + ' had no matching pairs with the other filters, so it was reset to All.'; note.classList.remove('hidden'); }
+  else note.classList.add('hidden');
+  return resets;
 }
 function renderLegend() {
   $('legend').innerHTML = '<span class="lg-title">Proof:</span>' + ['shot', 'none', 'unv', 'mock'].map((k) => '<span class="proof ' + PROOF[k].cls + '" title="' + esc(PROOF[k].tip) + '"><span class="pi">' + PROOF[k].icon + '</span>' + PROOF[k].label + '</span>').join('') +
@@ -301,11 +351,11 @@ function countdown(end) {
 }
 function weekEvents(comps) {
   const from = dstr(dnum(D.anchor) - 6); const ev = [];
-  const keys = new Set(); comps.forEach((c) => { keys.add(c.pair + '|' + MALEE + '|' + c.retailer); keys.add(c.pair + '|' + c.comp + '|' + c.retailer); });
+  const keys = new Set(); comps.forEach((c) => { if (c.mSold) keys.add(c.pair + '|' + MALEE + '|' + c.retailer); if (c.kSold) keys.add(c.pair + '|' + c.comp + '|' + c.retailer); });
   keys.forEach((k) => {
     const s = D.series[k]; if (!s) return; const ds = Object.keys(s).sort(); const [pair, brand, retailer] = k.split('|');
     for (let i = 1; i < ds.length; i++) {
-      const d = ds[i]; if (d < from || d > D.anchor) continue; const a = s[ds[i - 1]], cur = s[d];
+      const d = ds[i]; if (d < from || d > D.anchor) continue; const a = s[ds[i - 1]], cur = s[d]; if (a.notSold || cur.notSold) continue;
       const base = { date: d, brand, retailer, pair, row: cur };
       if (!a.onPromo && cur.onPromo) ev.push(Object.assign(base, { type: 'start', label: 'Promo started', text: (cur.promo_mechanic || 'Promo') + ': ' + baht(a.unit) + ' → ' + baht(cur.unit) + (cur.promo_end_date ? ', until ' + nice(cur.promo_end_date) : '') }));
       else if (a.onPromo && !cur.onPromo) ev.push(Object.assign(base, { type: 'end', label: 'Promo ended', text: (a.promo_mechanic || 'Promo') + ' ended: ' + baht(a.unit) + ' → ' + baht(cur.unit) }));
@@ -331,7 +381,7 @@ function alertCard(c, L, reasons) {
     '<div class="card-foot">' + (L.m ? '<a href="' + esc(L.m.source_url) + '" target="_blank" rel="noopener">Malee page</a>' : '') + (L.k ? ' <a href="' + esc(L.k.source_url) + '" target="_blank" rel="noopener">' + esc(c.comp) + ' page</a>' : '') + '</div></div>';
 }
 function renderWeek() {
-  const used = {}; filteredComps().forEach((c) => { used[bandLabel(c) + (c.band.source === 'channel+pair' ? ' (' + c.pair + ')' : '')] = 1; });
+  const used = {}; filteredComps().filter((c) => c.avail === 'both').forEach((c) => { used[bandLabel(c) + (c.band.source === 'channel+pair' ? ' (' + c.pair + ')' : '')] = 1; });
   $('bandText').innerHTML = 'Only pairs that are out of band, near a band edge, or changed this week are shown here. Bands differ by channel and pair (MOCKUP, to be set by Marketing): <b>' + (Object.keys(used).map(esc).join('; ') || '–') + '</b>.';
   const comps = filteredComps();
   const cs = comps.map((c) => ({ c, L: latestCompare(c) }));
@@ -350,7 +400,7 @@ function renderWeek() {
     if (compPromoEv || idxMove == null || Math.abs(idxMove) >= 1) { changed[c.key] = { n: mine.length, idx0, idxMove }; lastEv[c.key] = mine[0]; }
   });
   const alerts = cs.filter(({ L }) => L.status === 'red' || L.status === 'amber');
-  const quiet = cs.filter(({ c, L }) => !(L.status === 'red' || L.status === 'amber') && changed[c.key]);
+  const quiet = cs.filter(({ c, L }) => !L.ns && !(L.status === 'red' || L.status === 'amber') && changed[c.key]);
   const nOut = cs.filter((x) => x.L.status === 'red').length, nNear = cs.filter((x) => x.L.status === 'amber').length, nOk = cs.filter((x) => x.L.status === 'green').length, nNa = cs.length - nOut - nNear - nOk;
   $('alertCount').textContent = cs.length ? '(' + (alerts.length + quiet.length) + ' of ' + cs.length + ' pairs need a look)' : '';
   const cards = alerts.map(({ c, L }) => alertCard(c, L, changed[c.key] ? ['Changed this week'] : [])).join('');
@@ -361,7 +411,7 @@ function renderWeek() {
       '<span class="card-sub">' + (e ? esc(e.brand) + ': ' + e.label.toLowerCase() + ' (' + nice(e.date) + ')' : '') + '</span>' +
       '<span class="qmove"><b class="qaction" title="Recommended action – a suggestion, not a fact">' + esc(headline(c, L)) + '</b> · Malee ' + baht(L.m && L.m.unit) + ' ' + priceMeta(L.m) + ' · ' + esc(c.comp) + ' ' + baht(L.k && L.k.unit) + ' ' + priceMeta(L.k) + '</span></div>';
   }).join('') + '</div>' : '';
-  $('alerts').innerHTML = !cs.length ? '<div class="empty">No SKU pairs match the filters.</div>' : (alerts.length || quiet.length) ? (cards ? '<div class="cards">' + cards + '</div>' : '') + quietHTML : '<div class="empty">All ' + cs.length + ' pairs are in band and nothing important changed this week.</div>';
+  $('alerts').innerHTML = !cs.length ? '<div class="empty">No SKU pairs match the filters.</div>' : (alerts.length || quiet.length) ? (cards ? '<div class="cards">' + cards + '</div>' : '') + quietHTML : '<div class="empty">' + (nOk ? (nOk === cs.length ? 'All ' : '') + nOk + (nOk === 1 ? ' pair is' : ' pairs are') + ' in band and nothing important changed this week.' : 'Nothing to act on.') + (nNa ? ' ' + nNa + (nNa === 1 ? ' pair has' : ' pairs have') + ' no comparison (a SKU is not sold here or has no price) – see Today\u2019s status.' : '') + '</div>';
 
   $('changes').innerHTML = ev.length ? ev.map((e) => '<li><span class="when">' + nice(e.date) + '</span><span class="ev ' + e.type + '">' + e.label + '</span>' + brandPill(e.brand) +
     '<span class="what"><b>' + esc(e.retailer) + '</b> · ' + esc(pairLabel(e.pair)) + ' — ' + e.text + '</span>' + priceMeta(e.row) +
@@ -373,18 +423,18 @@ function renderWeek() {
   $('todayTable').innerHTML = head + cs.map(({ c, L }) => {
     const gap = L.m && L.k ? L.m.unit - L.k.unit : null;
     return '<tr><td><b>' + esc(c.retailer) + '</b><div class="card-sub">' + esc(c.channel) + '</div></td><td>' + esc(pairLabel(c.pair)) + '</td><td>' + brandPill(c.comp) + '</td>' +
-      '<td class="num">' + baht(L.m && L.m.unit) + '</td><td class="num">' + baht(L.k && L.k.unit) + '</td>' +
+      '<td class="num">' + (L.mNS ? nsTag('Malee', c) : baht(L.m && L.m.unit)) + '</td><td class="num">' + (L.kNS ? nsTag(c.comp, c) : baht(L.k && L.k.unit)) + '</td>' +
       '<td class="num">' + (gap == null ? '–' : (gap > 0 ? '+' : gap < 0 ? '−' : '') + baht(Math.abs(gap))) + '</td>' +
-      '<td class="num"><b class="idx ' + L.status + '">' + fix1(L.idx) + '</b></td><td><span class="status ' + L.status + '">' + STATUS_TEXT[L.status] + '</span></td><td>' + bandChip(c) + '</td>' +
+      '<td class="num"><b class="idx ' + L.status + '">' + fix1(L.idx) + '</b></td><td><span class="status ' + L.status + '"' + (L.ns ? ' title="' + esc(headline(c, L)) + '"' : '') + '>' + STATUS_TEXT[L.status] + '</span></td><td>' + (L.ns ? '<span class="card-sub">–</span>' : bandChip(c)) + '</td>' +
       '<td>' + (promoTagHTML(L.m, MALEE) + ' ' + promoTagHTML(L.k, c.comp)).trim() + '</td>' +
-      '<td class="small-cell">' + (L.m ? 'Malee ' + freshHTML(L.m) : '') + (L.k ? '<br>' + esc(c.comp) + ' ' + freshHTML(L.k) : '') + '</td><td class="small-cell">' + (L.m ? proofIcon(L.m, true) : '') + ' ' + (L.k ? proofIcon(L.k, true) : '') + (/out of stock/i.test((L.m || {}).note) ? ' <span class="tag warn">Malee out of stock</span>' : '') + '</td></tr>';
+      '<td class="small-cell">' + (L.mRaw ? 'Malee ' + freshHTML(L.mRaw) : '') + (L.kRaw ? '<br>' + esc(c.comp) + ' ' + freshHTML(L.kRaw) : '') + '</td><td class="small-cell">' + (L.mRaw ? proofIcon(L.mRaw, true) : '') + ' ' + (L.kRaw ? proofIcon(L.kRaw, true) : '') + (/out of stock/i.test((L.m || {}).note) ? ' <span class="tag warn">Malee out of stock</span>' : '') + '</td></tr>';
   }).join('');
 }
 
 // ---------- tab: Promo Pattern ----------
 function promoEnd(p) { return p.end_date || D.anchor; }
 function renderPromo() {
-  const cs = filteredComps(); const keyset = new Set(cs.map((c) => c.pair + '|' + c.comp + '|' + c.retailer));
+  const cs = filteredComps(); const keyset = new Set(cs.filter((c) => c.kSold).map((c) => c.pair + '|' + c.comp + '|' + c.retailer));
   const compPromos = D.promos.filter((p) => p.brand !== MALEE && keyset.has(p.pair_id + '|' + p.brand + '|' + p.retailer));
   const histDays = dnum(D.anchor) - dnum(D.firstDate) + 1;
   $('patternSub').textContent = 'Based on all ' + histDays + ' days of history (' + nice(D.firstDate) + ' – ' + nice(D.anchor) + ') for the selected retailer, pair and competitor. Includes MOCKUP history.';
@@ -414,6 +464,7 @@ function renderPromo() {
   const ticks = []; for (let n = dnum(from); n <= dnum(to); n += Math.max(1, Math.round(span / 8))) ticks.push(dstr(n));
   $('timelines').innerHTML = cs.length ? cs.map((c) => {
     const lane = (brand) => {
+      if (brand === MALEE ? !c.mSold : !c.kSold) return '<div class="lane"><div class="lane-name" style="color:' + brandColor(brand) + '">' + esc(brand) + '</div><div class="lane-track ns-track">' + nsTag(brand, c) + '</div></div>';
       const ps = D.promos.filter((p) => p.brand === brand && p.pair_id === c.pair && p.retailer === c.retailer && promoEnd(p) >= from && p.start_date <= to);
       const col = brandColor(brand);
       return '<div class="lane"><div class="lane-name" style="color:' + col + '">' + esc(brand) + '</div><div class="lane-track">' + ps.map((p) => {
@@ -423,14 +474,14 @@ function renderPromo() {
       }).join('') + '</div></div>';
     };
     const ser = compSeries(c, from, to);
-    const strip = '<div class="lane"><div class="lane-name" style="color:var(--muted)">Index status</div><div class="lane-track thin">' + ser.map((s) => '<div class="day ' + (s.idx == null ? 'none' : statusOf(s.idx, c.band)) + '" data-tip="' + esc(nice(s.date) + ': index ' + (s.idx == null ? 'n/a' : s.idx.toFixed(1))) + '"></div>').join('') + '</div></div>';
+    const strip = '<div class="lane"><div class="lane-name" style="color:var(--muted)">Index status</div><div class="lane-track thin">' + ser.map((s) => '<div class="day ' + (s.idx == null ? 'none' : statusOf(s.idx, c.band)) + '" data-tip="' + esc(nice(s.date) + ': ' + (s.mNS || s.kNS ? 'no comparison (not sold here)' : 'index ' + (s.idx == null ? 'n/a' : s.idx.toFixed(1)))) + '"></div>').join('') + '</div></div>';
     const axis = '<div class="axis"><div></div><div class="axis-track">' + ticks.map((t) => '<span style="left:' + ((dnum(t) - dnum(from) + 0.5) / span) * 100 + '%">' + nice(t) + '</span>').join('') + '</div></div>';
     return '<div class="tl"><div class="tl-head"><div class="tl-title">' + esc(c.retailer) + ' · ' + esc(pairTitle(c)) + ' ' + bandChip(c) + '</div><div class="legend"><span><i style="background:#9fd3ad"></i>In band</span><span><i style="background:#f6c26b"></i>Near edge</span><span><i style="background:#e57368"></i>Out of band</span><span><i style="background:repeating-linear-gradient(45deg,#999 0 3px,#ccc 3px 6px)"></i>Ongoing</span></div></div>' +
       lane(MALEE) + lane(c.comp) + strip + axis + '</div>';
   }).join('') : '<div class="empty">No SKU pairs match the filters.</div>';
 }
 function renderCalc() {
-  const cs = filteredComps(); if (!cs.length) { $('calc').innerHTML = '<div class="empty">No SKU pairs match the filters.</div>'; return; }
+  const cs = filteredComps().filter((c) => c.avail === 'both'); if (!cs.length) { $('calc').innerHTML = '<div class="empty">No pair in this selection has both SKUs sold at the retailer, so there is nothing to calculate.</div>'; return; }
   let sel = cs.find((c) => c.key === S.calcKey) || cs.find((c) => latestCompare(c).k) || cs[0]; S.calcKey = sel.key;
   const L = latestCompare(sel);
   const compPrice = S.calcPriceKey === sel.key && S.calcPrice != null ? S.calcPrice : (L.k ? L.k.unit : null);
@@ -502,13 +553,13 @@ function renderHistory() {
   document.querySelectorAll('#metric button').forEach((bt) => bt.classList.toggle('on', bt.dataset.m === S.metric));
   $('histSub').innerHTML = (S.metric === 'idx' ? 'Index line with the green band that applies to each retailer channel and pair. ' : 'Malee (blue) vs competitor, price per 100 ml. ') + 'Coloured bars on top mark promo days; light shading = competitor promo. Circles = REAL checks. ' + nice(from) + ' – ' + nice(to) + '.';
   $('charts').classList.toggle('single', cs.length === 1);
-  $('charts').innerHTML = cs.length ? cs.map((c) => '<div class="chart"><div class="chart-title"><span>' + esc(c.retailer) + ' · ' + esc(pairTitle(c)) + ' ' + bandChip(c) + '</span><span class="legend"><span><i style="background:' + brandColor(MALEE) + '"></i>Malee</span><span><i style="background:' + brandColor(c.comp) + '"></i>' + esc(c.comp) + '</span></span></div>' + svgChart(c, from, to) + '</div>').join('') : '<div class="empty">No SKU pairs match the filters.</div>';
+  $('charts').innerHTML = cs.length ? cs.map((c) => '<div class="chart"><div class="chart-title"><span>' + esc(c.retailer) + ' · ' + esc(pairTitle(c)) + ' ' + (c.avail === 'both' ? bandChip(c) : '<span class="status grey">No comparison</span> ' + (!c.mSold ? 'Malee ' + nsTag('Malee', c) : '') + (!c.kSold ? ' ' + esc(c.comp) + ' ' + nsTag(c.comp, c) : '')) + '</span><span class="legend"><span><i style="background:' + brandColor(MALEE) + '"></i>Malee</span><span><i style="background:' + brandColor(c.comp) + '"></i>' + esc(c.comp) + '</span></span></div>' + svgChart(c, from, to) + '</div>').join('') : '<div class="empty">No SKU pairs match the filters.</div>';
   document.querySelectorAll('#charts svg').forEach(bindChartHover);
   // table
-  const rows = []; cs.forEach((c) => compSeries(c, from, to).forEach((s) => { if (s.m || s.k) rows.push({ c, s }); }));
+  const rows = []; cs.forEach((c) => compSeries(c, from, to).forEach((s) => { if (s.m || s.k || getRow(c.pair, MALEE, c.retailer, s.date) || getRow(c.pair, c.comp, c.retailer, s.date)) rows.push({ c, s }); }));
   rows.sort((a, b) => b.s.date.localeCompare(a.s.date) || a.c.retailer.localeCompare(b.c.retailer));
   $('histTable').innerHTML = '<tr><th>Date</th><th>Retailer</th><th>SKU pair</th><th class="num">Malee ฿</th><th class="num">Competitor ฿</th><th class="num">Malee /100ml</th><th class="num">Comp. /100ml</th><th class="num">Index</th><th>Band</th><th>Promos</th><th>Data</th></tr>' +
-    rows.map(({ c, s }) => { const st = statusOf(s.idx, c.band); return '<tr><td>' + nice(s.date) + '</td><td>' + esc(c.retailer) + '</td><td>' + esc(pairLabel(c.pair)) + ' ' + brandPill(c.comp) + '</td><td class="num">' + baht(s.m && s.m.unit) + '</td><td class="num">' + baht(s.k && s.k.unit) + '</td><td class="num">' + (s.m ? s.m.ppm.toFixed(2) : '–') + '</td><td class="num">' + (s.k ? s.k.ppm.toFixed(2) : '–') + '</td><td class="num"><b class="idx ' + st + '">' + fix1(s.idx) + '</b></td><td>' + bandChip(c) + '</td><td>' + (promoTagHTML(s.m, MALEE) + ' ' + promoTagHTML(s.k, c.comp)).trim() + '</td><td>' + flags(s.m || s.k) + '</td></tr>'; }).join('');
+    rows.map(({ c, s }) => { const st = statusOf(s.idx, c.band); const ns = s.mNS || s.kNS; return '<tr><td>' + nice(s.date) + '</td><td>' + esc(c.retailer) + '</td><td>' + esc(pairLabel(c.pair)) + ' ' + brandPill(c.comp) + '</td><td class="num">' + (s.mNS ? nsTag('Malee', c) : baht(s.m && s.m.unit)) + '</td><td class="num">' + (s.kNS ? nsTag(c.comp, c) : baht(s.k && s.k.unit)) + '</td><td class="num">' + (s.m && s.m.ppm != null ? s.m.ppm.toFixed(2) : '–') + '</td><td class="num">' + (s.k && s.k.ppm != null ? s.k.ppm.toFixed(2) : '–') + '</td><td class="num">' + (ns ? '<span class="status grey">No comparison</span>' : '<b class="idx ' + st + '">' + fix1(s.idx) + '</b>') + '</td><td>' + (ns ? '<span class="card-sub">–</span>' : bandChip(c)) + '</td><td>' + (promoTagHTML(s.m, MALEE) + ' ' + promoTagHTML(s.k, c.comp)).trim() + '</td><td>' + flags(s.m || s.k) + '</td></tr>'; }).join('');
 }
 function bindChartHover(svg) {
   const c = D.comps.find((x) => x.key === svg.dataset.key); if (!c) return; const ser = compSeries(c, svg.dataset.from, svg.dataset.to);
@@ -517,8 +568,8 @@ function bindChartHover(svg) {
     const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY; const p = pt.matrixTransform(svg.getScreenCTM().inverse());
     const i = Math.max(0, Math.min(n - 1, Math.round(((p.x - pl) / iw) * (n - 1)))); const s = ser[i]; const xx = pl + (n === 1 ? iw / 2 : (i / (n - 1)) * iw);
     line.setAttribute('x1', xx); line.setAttribute('x2', xx); line.setAttribute('opacity', '0.6');
-    const row = (r, br) => r ? '<b style="color:' + brandColor(br) + '">' + esc(br) + '</b> ' + baht(r.unit) + ' (' + r.ppm.toFixed(2) + '/100ml)' + (r.onPromo ? ' · ' + esc(r.promo_mechanic) : '') + ' · ' + r.data_type : esc(br) + ': no data';
-    showTip(e, '<b>' + niceY(s.date) + '</b><br>' + row(s.m, MALEE) + '<br>' + row(s.k, c.comp) + '<br>Index <b>' + fix1(s.idx) + '</b> (' + STATUS_TEXT[statusOf(s.idx, c.band)] + ')');
+    const row = (r, br, ns) => ns ? esc(br) + ': not sold here' : r ? '<b style="color:' + brandColor(br) + '">' + esc(br) + '</b> ' + baht(r.unit) + ' (' + r.ppm.toFixed(2) + '/100ml)' + (r.onPromo ? ' · ' + esc(r.promo_mechanic) : '') + ' · ' + r.data_type : esc(br) + ': no data';
+    showTip(e, '<b>' + niceY(s.date) + '</b><br>' + row(s.m, MALEE, s.mNS) + '<br>' + row(s.k, c.comp, s.kNS) + '<br>' + (s.mNS || s.kNS ? 'No comparison' : 'Index <b>' + fix1(s.idx) + '</b> (' + STATUS_TEXT[statusOf(s.idx, c.band)] + ')'));
   });
   hit.addEventListener('mouseleave', () => { line.setAttribute('opacity', '0'); hideTip(); });
 }
@@ -544,7 +595,7 @@ function renderLog() {
     rows.slice(S.logPage * per, S.logPage * per + per).map((r) => '<tr>' + LOG_COLS.map(([k]) => {
       if (k === 'check_datetime') return '<td style="white-space:nowrap">' + freshHTML(r).replace('checked ', '') + '<div class="card-sub">' + nice(r.date) + ' ' + r.check_datetime.slice(11, 16) + '</div></td>';
       if (k === 'brand') return '<td>' + brandPill(r.brand) + '</td>';
-      if (k === 'data_type') return '<td><span class="tag ' + esc(r.data_type) + '">' + esc(r.data_type) + '</span></td>';
+      if (k === 'data_type') return '<td><span class="tag ' + esc(r.data_type) + '">' + esc(r.data_type) + '</span>' + (r.superseded ? ' <span class="tag sup" title="A later check of this SKU at this retailer on the same day replaces this row; the dashboard ignores it.">Superseded</span>' : '') + (r.notSold ? ' <span class="tag ns">Not sold here</span>' : '') + '</td>';
       if (k === 'promo_end_date') return '<td>' + (r.promo_end_date ? nice(r.promo_end_date) : '') + '</td>';
       if (NUMCOLS.has(k)) return '<td class="num">' + (r[k] === '' ? '' : (k === 'price_per_100ml' ? (+r[k]).toFixed(2) : baht(num(r[k])))) + '</td>';
       return '<td>' + esc(r[k]) + '</td>';
@@ -578,16 +629,13 @@ function render() {
   try { history.replaceState(null, '', '#' + S.tab); } catch (e) { /* file:// */ }
 }
 document.querySelectorAll('.tab').forEach((t) => t.onclick = () => { S.tab = t.dataset.tab; render(); });
-$('fChannel').onchange = (e) => { S.channel = e.target.value; S.retailer = 'All'; S.logPage = 0; buildFilters(); render(); };
-$('fRetailer').onchange = (e) => { S.retailer = e.target.value; S.logPage = 0; render(); };
-$('fPair').onchange = (e) => { S.pair = e.target.value; S.logPage = 0; render(); };
-$('fComp').onchange = (e) => { S.comp = e.target.value; S.logPage = 0; render(); };
+FDIMS.forEach((f) => { $(f.id).onchange = (e) => { S[f.k] = e.target.value; S.logPage = 0; buildFilters(f.k); render(); }; });
 document.querySelectorAll('#fRange button').forEach((b) => b.onclick = () => { S.days = +b.dataset.days; S.logPage = 0; render(); });
 document.querySelectorAll('#metric button').forEach((b) => b.onclick = () => { S.metric = b.dataset.m; render(); });
 $('logSearch').oninput = (e) => { S.logQuery = e.target.value; S.logPage = 0; renderLog(); };
 $('dlCsv').onclick = downloadCSV;
 $('reload').onclick = load;
 const h = (location.hash || '').slice(1); if (['week', 'promo', 'history', 'log'].includes(h)) S.tab = h;
-window.__tracker = { S, get D() { return D; }, render, statusOf, latestCompare, suggestion, parseCSV };
+window.__tracker = { S, get D() { return D; }, render, statusOf, latestCompare, suggestion, parseCSV, buildFilters, filteredComps, FDIMS };
 load();
 })();
